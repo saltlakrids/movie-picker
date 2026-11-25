@@ -119,11 +119,12 @@ export default function SwipeDeck({ partyId, onMatch }) {
   if (!top) {
     return (
       <div className="deck-empty">
-        <div className="big-emoji">🎞️</div>
-        <h3>{exhausted ? "You've swiped through everything" : 'Loading more…'}</h3>
-        {exhausted && <p className="muted">Add more streaming services in party settings, or check back later for new titles.</p>}
-        {last && <button className="btn" onClick={undo}>↶ Undo last swipe</button>}
+        <div className="big-emoji">{error ? '⚠️' : '🎞️'}</div>
+        <h3>{error ? "Couldn't load movies" : exhausted ? "You've swiped through everything" : 'Loading more…'}</h3>
         {error && <p className="error">{error}</p>}
+        {error && <button className="btn primary" onClick={() => { setLoading(true); fetchMore(); }}>Try again</button>}
+        {!error && exhausted && <p className="muted">Add more streaming services in party settings, or check back later for new titles.</p>}
+        {last && <button className="btn" onClick={undo}>↶ Undo last swipe</button>}
       </div>
     );
   }

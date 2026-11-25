@@ -12,12 +12,17 @@ const GENRES = {
 const PAGE_TTL_HOURS = 24;
 
 export function createCatalog(db, env = process.env, fetchImpl = globalThis.fetch) {
-  const apiKey = env.TMDB_API_KEY;
-  const readToken = env.TMDB_READ_TOKEN;
+  // Accept either credential in either variable: a v4 read token is a JWT
+  // (contains dots), a v3 API key is a short hex string. Tolerate a pasted "Bearer " prefix.
+  const clean = (v) => (v || '').trim().replace(/^bearer\s+/i, '');
+  const creds = [clean(env.TMDB_READ_TOKEN), clean(env.TMDB_API_KEY)].filter(Boolean);
+  const readToken = creds.find((c) => c.includes('.'));
+  const apiKey = creds.find((c) => !c.includes('.'));
   const region = env.TMDB_REGION || 'DK';
   const language = env.TMDB_LANGUAGE || 'en-US';
   const live = !!(apiKey || readToken);
   let providerIds = null; // key -> TMDB provider id
+  let providerError = null; // why the last provider lookup failed
 
   async function tmdb(path, params = {}) {
     const url = new URL(TMDB + path);
@@ -26,24 +31,31 @@ export function createCatalog(db, env = process.env, fetchImpl = globalThis.fetc
     if (readToken) headers.authorization = `Bearer ${readToken}`;
     else url.searchParams.set('api_key', apiKey);
     const res = await fetchImpl(url, { headers });
-    if (!res.ok) throw new Error(`TMDB ${path} failed: ${res.status}`);
+    if (!res.ok) {
+      const hint = res.status === 401 ? ' (TMDB rejected the key: check TMDB_READ_TOKEN / TMDB_API_KEY in .env)' : '';
+      throw new Error(`TMDB ${path} failed with ${res.status}${hint}`);
+    }
     return res.json();
   }
 
   async function resolveProviderIds() {
     if (providerIds) return providerIds;
     const ids = {};
+    let ok = false;
     try {
       const { results = [] } = await tmdb('/watch/providers/movie', { watch_region: region, language });
       for (const p of PROVIDERS) {
         const hit = results.find((r) => p.match.test(r.provider_name.trim()));
         if (hit) ids[p.key] = hit.provider_id;
       }
+      ok = true;
+      providerError = null;
     } catch (e) {
+      providerError = e;
       console.warn('[catalog] could not load provider list, using fallbacks:', e.message);
     }
     for (const p of PROVIDERS) if (!ids[p.key] && p.fallbackId) ids[p.key] = p.fallbackId;
-    providerIds = ids;
+    if (ok) providerIds = ids; // retry the lookup next time if it failed
     return ids;
   }
 
@@ -74,7 +86,10 @@ export function createCatalog(db, env = process.env, fetchImpl = globalThis.fetc
   async function fetchNextPage(providerKey) {
     const ids = await resolveProviderIds();
     const pid = ids[providerKey];
-    if (!pid) return 0;
+    if (!pid) {
+      if (providerError) throw providerError;
+      return 0;
+    }
     const pages = db.prepare(`SELECT page, total_pages, fetched_at > datetime('now', ?) fresh
       FROM catalog_pages WHERE provider = ? ORDER BY page`).all(`-${PAGE_TTL_HOURS} hours`, providerKey);
     const stale = pages.find((p) => !p.fresh);
@@ -116,16 +131,25 @@ export function createCatalog(db, env = process.env, fetchImpl = globalThis.fetc
    */
   async function ensureAvailable(providers, countUnswiped, want) {
     if (!live) return;
+    let lastError = null;
     for (let round = 0; round < 3 && countUnswiped() < want; round++) {
       let added = 0;
       for (const p of providers) {
         try {
           added += await fetchNextPage(p);
         } catch (e) {
+          lastError = e;
           console.warn(`[catalog] fetch failed for ${p}:`, e.message);
         }
       }
       if (!added) break;
+    }
+    // Only surface the error when there is nothing at all to show.
+    if (lastError && countUnswiped() === 0) {
+      const err = new Error(`Couldn't load movies from TMDB. ${lastError.message}`);
+      err.status = 502;
+      err.expose = true;
+      throw err;
     }
   }
 
