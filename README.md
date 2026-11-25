@@ -31,6 +31,8 @@ npm start              # serves API + app on http://localhost:3001
 
 Tests: `npm test`
 
+Deploying (Railway or Fly.io, Docker): see [DEPLOY.md](DEPLOY.md).
+
 ### Movie data
 
 Movies come from [TMDB](https://www.themoviedb.org/)'s discover API filtered by
