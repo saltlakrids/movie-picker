@@ -15,7 +15,7 @@ async function startServer(env = {}, fetchImpl) {
 }
 
 // Throwaway credentials for in-memory test users, generated per run.
-const pw = { alice: randomUUID(), bob: randomUUID(), carol: randomUUID(), dora: randomUUID() };
+const pw = Object.fromEntries(['alice', 'bob', 'carol', 'dora', 'erin', 'finn'].map((u) => [u, randomUUID()]));
 
 /** Sign up or log in `c` as `username` (case-insensitive) with that user's generated password, or `pass` if given. */
 function authAs(c, kind, username, { pass, displayName } = {}) {
@@ -162,6 +162,43 @@ test('live mode pulls Danish catalog pages from TMDB per provider', async () => 
     const discover = calls.filter((c) => c.includes('/discover/movie'));
     assert.ok(discover.every((c) => c.includes('watch_region=DK') && c.includes('with_watch_providers=999')));
     assert.equal(discover.length, 2); // wanted 40 unswiped -> fetched both pages
+  } finally {
+    close();
+  }
+});
+
+test('a v3 API key pasted into TMDB_READ_TOKEN is sent as api_key', async () => {
+  const seen = [];
+  const fakeFetch = async (url, opts) => {
+    seen.push({ url: new URL(url), auth: opts.headers.authorization });
+    return new Response(JSON.stringify({ results: [], total_pages: 1 }), { status: 200 });
+  };
+  const { base, close } = await startServer({ TMDB_READ_TOKEN: ' Bearer abc123def456 ' }, fakeFetch);
+  try {
+    const c = client(base);
+    await authAs(c, 'register', 'erin');
+    const { body: { party } } = await c('POST', '/api/parties', { providers: ['netflix'] });
+    await c('GET', `/api/parties/${party.id}/deck`);
+    assert.ok(seen.length > 0);
+    for (const s of seen) {
+      assert.equal(s.url.searchParams.get('api_key'), 'abc123def456');
+      assert.equal(s.auth, undefined);
+    }
+  } finally {
+    close();
+  }
+});
+
+test('a rejected TMDB key shows a clear error instead of an empty deck', async () => {
+  const fakeFetch = async () => new Response('{"status_message":"Invalid API key"}', { status: 401 });
+  const { base, close } = await startServer({ TMDB_READ_TOKEN: 'eyJ.bad.token' }, fakeFetch);
+  try {
+    const c = client(base);
+    await authAs(c, 'register', 'finn');
+    const { body: { party } } = await c('POST', '/api/parties', { providers: ['dr'] });
+    const res = await c('GET', `/api/parties/${party.id}/deck`);
+    assert.equal(res.status, 502);
+    assert.match(res.body.error, /TMDB rejected the key/);
   } finally {
     close();
   }
